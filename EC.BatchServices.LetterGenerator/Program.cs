@@ -1,10 +1,9 @@
 using NLog.Extensions.Logging;
 using System.Data;
 using System.Data.SqlClient;
-using EC.BatchServices.LetterGenerator;
 using System.Net.Http.Headers;
 
-namespace YourNamespace
+namespace EC.BatchServices.LetterGenerator
 {
     class Program
     {

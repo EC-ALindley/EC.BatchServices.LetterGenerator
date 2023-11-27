@@ -8,7 +8,6 @@ using System.Net.Http.Headers;
 using System.Web;
 using Newtonsoft.Json.Linq;
 using RestSharp;
-using System.Net.Mime;
 using System.Text;
 
 public class ReportGenerator
@@ -138,22 +137,6 @@ public class ReportGenerator
         return reportUrl;
     }
 
-    public async Task<IEnumerable<ReportDetailDTO>> FetchReportDetailsAsync()
-    {
-        var client = _httpClientFactory.CreateClient("SSRSClient");
-        var response = await client.GetAsync(_config.SSRS.BaseAddress + "/Reports/api/v2.0/CatalogItems");
-        response.EnsureSuccessStatusCode();
-
-        var content = await response.Content.ReadAsStringAsync();
-        var jsonObject = JObject.Parse(content);
-
-        // Extract the array associated with the 'value' key
-        var itemsArray = jsonObject["value"].ToString();
-        var reportDetails = JsonConvert.DeserializeObject<IEnumerable<ReportDetailDTO>>(itemsArray);
-
-        return reportDetails;
-    }
-
     public async Task<bool> IsWorkPendingAsync()
     {
         var workCountQuery = "SELECT COUNT(*) FROM ReportService.ReportQueue WHERE Flag = 1";
@@ -199,7 +182,8 @@ public class ReportGenerator
             FileGuid = Guid.NewGuid(),
             ChangeTime = DateTime.Now,
             CreationTime = DateTime.Now,
-            Title = "SystemLetter",
+            //This Title may need to be passed in
+            Title = "System Letter",
             Extension = request.DocumentFormat,
             FileName = fileName,
             FileSize = image.Length,
