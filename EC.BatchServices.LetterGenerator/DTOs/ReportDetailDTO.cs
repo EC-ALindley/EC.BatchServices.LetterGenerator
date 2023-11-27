@@ -13,7 +13,7 @@
         public string ModifiedDate { get; set; }
         public string CreatedBy { get; set; }
         public string CreatedDate { get; set; }
-        public Guid ParentFolderId { get; set; }
+        public Guid? ParentFolderId { get; set; }
         public string ContentType { get; set; }
         public string Content { get; set; }
         public bool IsFavorite { get; set; }

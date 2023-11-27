@@ -1,4 +1,6 @@
-﻿namespace EC.BatchServices.LetterGenerator.DAOs
+﻿using Newtonsoft.Json;
+
+namespace EC.BatchServices.LetterGenerator.DAOs
 {
     public class ReportDetailDAO
     {
@@ -23,5 +25,26 @@
         public bool HasDataSources { get; set; }
         public bool HasSharedDataSets { get; set; }
         public bool HasParameters { get; set; }
+
+        private readonly HttpClient _httpClient;
+        private static readonly string SsrsApiBaseUrl = "http://ecdev02/reports/api/v2.0/"; // Replace with actual SSRS REST API base URL
+
+        public ReportDetailDAO(HttpClient httpClient)
+        {
+            _httpClient = httpClient;
+        }
+
+        public async Task<IEnumerable<ReportDetailDAO>> FetchReportDetailsAsync()
+        {
+            var response = await _httpClient.GetAsync(SsrsApiBaseUrl + "CatalogItems"); // Update the endpoint as per actual SSRS REST API
+            response.EnsureSuccessStatusCode();
+
+            var content = await response.Content.ReadAsStringAsync();
+            var reportDetails = JsonConvert.DeserializeObject<IEnumerable<ReportDetailDAO>>(content);
+
+            // Perform caching logic here if needed
+
+            return reportDetails;
+        }
     }
 }

@@ -1,9 +1,4 @@
-﻿using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
+﻿using Microsoft.Extensions.Logging;
 public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
@@ -35,7 +30,6 @@ public class Worker : BackgroundService
                 }
                 _logger.LogInformation("Waiting for 1 hour before the next execution.");
             }
-
             catch (Exception ex)
             {
                 _logger.LogError(ex, "An error occurred while generating the report.");
@@ -43,4 +37,5 @@ public class Worker : BackgroundService
             await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
         }
     }
+
 }

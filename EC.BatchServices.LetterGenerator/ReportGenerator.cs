@@ -1,14 +1,15 @@
-﻿using System.Text;
-using Microsoft.Extensions.Options;
+﻿using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using Dapper;
-using System.Data;
 using EC.BatchServices.LetterGenerator.DTOs;
-using EC.BatchServices.LetterGenerator.DAOs;
-using System.Web;
-using System.Reflection.Metadata;
 using EC.BatchServices.LetterGenerator;
+using System.Data;
 using System.Net.Http.Headers;
+using System.Web;
+using Newtonsoft.Json.Linq;
+using RestSharp;
+using System.Net.Mime;
+using System.Text;
 
 public class ReportGenerator
 {
@@ -31,35 +32,59 @@ public class ReportGenerator
 
     public async Task GenerateAndSaveReportsAsync()
     {
-        _logger.LogInformation("Retrieving reports pending...");
-        var reportsNeeded = await GetPendingReportsAsync();
-        _logger.LogInformation($"{reportsNeeded.Count()} report(s) are pending.");
-
-        _logger.LogInformation($"Building report requests...");
-        var reportRequests = await BuildReportRequestsAsync(reportsNeeded);
-
-        foreach (var reportRequest in reportRequests)
+        try
         {
-            await GenerateAndSaveReportAsync(reportRequest);
+            _logger.LogInformation("Retrieving reports pending...");
+            var reportsPending = await GetPendingReportsAsync();
+            _logger.LogInformation($"{reportsPending.Count()} report(s) are pending.");
+
+            _logger.LogInformation($"Contacting SSRS to generate reports...");
+            var reportsGenerated = 0;
+            foreach (var request in reportsPending)
+            {
+                try
+                {
+                    await GenerateAndSaveReportAsync(request);
+                    reportsGenerated++;
+                    _logger.LogInformation($"{reportsGenerated} reports have been generated.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"Error generating report for request on claimID {request.ClaimID}: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"An error occurred: {ex.Message}");
         }
     }
 
-    private async Task<IEnumerable<(int ReportQueueId, string ReportName)>> GetPendingReportsAsync()
+
+    private async Task<List<ReportRequest>> GetPendingReportsAsync()
     {
-        var reportsNeededQuery = "SELECT ReportQueueId, ReportName FROM ReportService.ReportQueue WHERE Flag = 1";
-        return await _dbConnection.QueryAsync<(int ReportQueueId, string ReportName)>(reportsNeededQuery);
+        var reportsNeededQuery = "SELECT ReportQueueID, ReportName, " +
+            "ReportTypeID, DocumentTypeID, ClaimID, DocumentFormat FROM ReportService.ReportQueue WHERE Flag = 1";
+        var result = await _dbConnection.QueryAsync<(int ReportQueueID, string ReportName, int ReportTypeID, 
+            int DocumentTypeID, int ClaimID, string DocumentFormat)>(reportsNeededQuery);
+        return await BuildReportRequestsAsync(result);
     }
 
-    private async Task<List<ReportRequest>> BuildReportRequestsAsync(IEnumerable<(int ReportQueueId, string ReportName)> reportsNeeded)
+    private async Task<List<ReportRequest>> BuildReportRequestsAsync(IEnumerable<(int ReportQueueID, string ReportName, 
+        int ReportTypeID, int DocumentTypeID, int ClaimID, string DocumentFormat)> reportsNeeded)
     {
         var reportRequests = new List<ReportRequest>();
         foreach (var report in reportsNeeded)
         {
-            var parameters = await GetReportQueueParametersFromDbAsync(report.ReportQueueId);
+            var parameters = await GetReportQueueParametersFromDbAsync(report.ReportQueueID);
             reportRequests.Add(new ReportRequest
             {
-                ReportQueueId = report.ReportQueueId,
+                ReportQueueID = report.ReportQueueID,
                 ReportName = report.ReportName,
+                ReportTypeID = report.ReportTypeID,
+                DocumentTypeID = report.DocumentTypeID,
+                ClaimID = report.ClaimID,
+                DocumentFormat = report.DocumentFormat,
                 Parameters = parameters
             });
         }
@@ -68,32 +93,66 @@ public class ReportGenerator
 
     private async Task GenerateAndSaveReportAsync(ReportRequest reportRequest)
     {
-        var client = _httpClientFactory.CreateClient();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($"{_config.SSRS.Username}:{_config.SSRS.Password}")));
+        var client = _httpClientFactory.CreateClient("SSRSClient");
 
-        var reportUrl = BuildReportUrl(reportRequest);
-        var reportData = await GetReportDataAsync(client, reportUrl);
-        // Add logic to save the report data
+        var reportUrl = await BuildReportUrl(reportRequest);
+        var request = new HttpRequestMessage(HttpMethod.Get, reportUrl);
+        var response = await client.SendAsync(request);
+
+        if (response.IsSuccessStatusCode)
+        {
+            var content = await response.Content.ReadAsByteArrayAsync();
+
+            var tempFileName = $"{reportRequest.ReportName}_{reportRequest.ClaimID}_{DateTime.UtcNow}";
+
+            await UploadReportDocument(reportRequest, tempFileName, 43, content);
+
+            //Report Type 2 is a RevSpring letter. Add document to the process queue.
+            if(reportRequest.ReportTypeID == 2)
+            {
+                //Add the uploaded document to the EDICloud Queue
+                _logger.LogError("Adding the letter to the Processing Queue...");
+            }
+        }
     }
 
-    private string BuildReportUrl(ReportRequest reportRequest)
+    private async Task<string> BuildReportUrl(ReportRequest reportRequest)
     {
         var reportParameters = HttpUtility.ParseQueryString(string.Empty);
+
         foreach (var param in reportRequest.Parameters)
         {
             reportParameters[param.Name] = param.Value;
         }
-        return $"{_config.SSRS.BaseAddress}/Reports/{reportRequest.ReportName}/ExportToPDF?{reportParameters}";
+
+        // Use the report Path in the URL, and ensure it's URL-encoded (ReportName needs to be updated to ReportPath)
+        var encodedReportPath = HttpUtility.UrlEncode(reportRequest.ReportName);
+
+        // Add the format parameter for PDF
+        reportParameters["rs:Format"] = "PDF";
+
+        var parametersString = reportParameters.ToString();
+        var reportUrl = $"http://ecdev02/ReportServer?{encodedReportPath}&{parametersString}";
+
+        _logger.LogInformation($"Sending Report Generation request, URL: {reportUrl}");
+        return reportUrl;
     }
 
-    private async Task<byte[]> GetReportDataAsync(HttpClient client, string reportUrl)
+    public async Task<IEnumerable<ReportDetailDTO>> FetchReportDetailsAsync()
     {
-        var reportResponse = await client.GetAsync(reportUrl);
-        reportResponse.EnsureSuccessStatusCode();
-        return await reportResponse.Content.ReadAsByteArrayAsync();
-    }
+        var client = _httpClientFactory.CreateClient("SSRSClient");
+        var response = await client.GetAsync(_config.SSRS.BaseAddress + "/Reports/api/v2.0/CatalogItems");
+        response.EnsureSuccessStatusCode();
 
+        var content = await response.Content.ReadAsStringAsync();
+        var jsonObject = JObject.Parse(content);
+
+        // Extract the array associated with the 'value' key
+        var itemsArray = jsonObject["value"].ToString();
+        var reportDetails = JsonConvert.DeserializeObject<IEnumerable<ReportDetailDTO>>(itemsArray);
+
+        return reportDetails;
+    }
 
     public async Task<bool> IsWorkPendingAsync()
     {
@@ -112,33 +171,36 @@ public class ReportGenerator
     }
     private async Task UpdateReportDetailsFlags(int queueId)
     {
-        var query = "UPDATE EnforcerServices.BatchServices.ReportsQueue SET Flag = 0 WHERE ReportsQueueId = @QueueId";
+        var query = "UPDATE EnforcerServices.ReportService.ReportQueue SET Flag = 0 WHERE ReportQueueID = @QueueId";
 
         var result = await _dbConnection.ExecuteAsync(query, new { QueueId = queueId });
 
         if (result == 0)
         {
-            throw new Exception("No report details were updated, check if the queueId is correct.");
+            _logger.LogError("No report details were updated, check if the queueId is correct.");
         }
     }
-    public async Task UploadReportDocument(int claimID, int? documentRequestID, int documentTypeID, string fileName, string title,
-        string extension, int userID, byte[] image)
+    private async Task UploadReportDocument(ReportRequest request, string fileName, int userID, byte[] image)
     {
-        var url = _config.DocumentImaging.BaseAddress; // Replace with your configuration access method
+        var client = _httpClientFactory.CreateClient("DocumentImagingClient");
+        var requestContent = new MultipartFormDataContent();
+        var imageContent = new ByteArrayContent(image);
+        if(request.DocumentFormat == "pdf")
+        imageContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf"); // Set the correct content type
 
-        var client = _httpClientFactory.CreateClient(); // Using HttpClientFactory
+        requestContent.Add(imageContent, "Image", fileName);
 
         var document = new EC.BatchServices.LetterGenerator.DAOs.Document
         {
-            ClaimID = claimID,
-            DocumentTypeID = documentTypeID,
-            DocumentRequestID = documentRequestID,
+            ClaimID = request.ClaimID,
+            DocumentTypeID = request.DocumentTypeID,
+            DocumentRequestID = null,
             FileID = 0,
             FileGuid = Guid.NewGuid(),
             ChangeTime = DateTime.Now,
             CreationTime = DateTime.Now,
-            Title = title,
-            Extension = extension,
+            Title = "SystemLetter",
+            Extension = request.DocumentFormat,
             FileName = fileName,
             FileSize = image.Length,
             LastAccessTime = DateTime.Now,
@@ -146,16 +208,25 @@ public class ReportGenerator
             UserID = userID,
             Image = null
         };
+        // Serialize your document object to JSON and add it to the request
+        var documentJson = JsonConvert.SerializeObject(document);
+        requestContent.Add(new StringContent(documentJson, Encoding.UTF8, "application/json"), "Document");
 
-        var requestContent = new MultipartFormDataContent();
-        var imageContent = new ByteArrayContent(image);
-        imageContent.Headers.ContentType = MediaTypeHeaderValue.Parse("image/jpeg"); // Adjust the MIME type as necessary
-        requestContent.Add(imageContent, "Letter", fileName);
-        requestContent.Add(new StringContent(JsonConvert.SerializeObject(document)), "Document");
-
-        var response = await client.PostAsync($"{url}/api/Document/InsertDocument", requestContent);
+        _logger.LogInformation($"Uploading document to DocumentImaging Service...");
+        var response = await client.PostAsync("http://ecdev04/DocumentImaging/api/Document/InsertDocument", requestContent);
         if (!response.IsSuccessStatusCode)
-            throw new Exception($"Error: {response.StatusCode}, {await response.Content.ReadAsStringAsync()}");
+        {
+            string responseContent = await response.Content.ReadAsStringAsync();
+            _logger.LogError($"Error: {response.StatusCode}, {responseContent}");
+
+            // Throwing an exception with detailed information
+            throw new HttpRequestException($"Request to DocumentImaging Service failed with status code {response.StatusCode}: {responseContent}");
+        }
+        else
+        {
+            _logger.LogInformation($"Upload Successful! ", response.Content);
+        }
     }
 
+    //TODO: Create Note about Letter being sent
 }

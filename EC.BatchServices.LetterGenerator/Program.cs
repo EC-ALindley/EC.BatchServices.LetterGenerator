@@ -1,30 +1,59 @@
-using EC.BatchServices.LetterGenerator;
-using Microsoft.Extensions.Configuration;
+using NLog.Extensions.Logging;
 using System.Data;
 using System.Data.SqlClient;
+using EC.BatchServices.LetterGenerator;
+using System.Net.Http.Headers;
 
-var host = Host.CreateDefaultBuilder(args)
-    .ConfigureServices((hostContext, services) =>
+namespace YourNamespace
+{
+    class Program
     {
-        // Retrieve the configuration from the host context
-        var configuration = hostContext.Configuration;
-
-        services.AddHttpClient();
-        services.AddTransient<ReportGenerator>();
-        services.AddHostedService<Worker>();
-
-        // Configure specific sections for DocumentImaging and SSRS
-        services.Configure<Config>(config =>
+        static async Task Main(string[] args)
         {
-            config.DocumentImaging = configuration.GetSection("DocumentImagingConfig").Get<DocumentImagingConfig>();
-            config.SSRS = configuration.GetSection("SSRSConfig").Get<SSRSConfig>();
-        });
+            var host = Host.CreateDefaultBuilder(args)
+                .ConfigureLogging((context, builder) =>
+                {
+                    builder.ClearProviders();
+                    builder.AddNLog(context.Configuration);
+                })
+                .ConfigureServices((hostContext, services) =>
+                {
+                    var configuration = hostContext.Configuration;
 
-        // Use the retrieved configuration to get the connection string
-        services.AddTransient<IDbConnection>(sp =>
-            new SqlConnection(configuration.GetConnectionString("DefaultConnection")));
-    })
-    .Build();
+                    services.AddHttpClient();
+                    services.AddTransient<ReportGenerator>();
+                    services.AddHostedService<Worker>();
 
+                    services.Configure<Config>(config =>
+                    {
+                        config.DocumentImaging = configuration.GetSection("DocumentImagingConfig").Get<DocumentImagingConfig>();
+                        config.SSRS = configuration.GetSection("SSRSConfig").Get<SSRSConfig>();
+                    });
 
-await host.RunAsync();
+                    services.AddTransient<IDbConnection>(sp =>
+                        new SqlConnection(configuration.GetConnectionString("EnforcerServices")));
+
+                    services.AddHttpClient("SSRSClient", client =>
+                    {
+                        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Negotiate");
+                        client.Timeout = Timeout.InfiniteTimeSpan;
+                    })
+                    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler()
+                    {
+                        UseDefaultCredentials = true
+                    });
+                    services.AddHttpClient("DocumentImagingClient", client =>
+                    {
+                        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Negotiate");
+                    })
+                    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler()
+                    {
+                        UseDefaultCredentials = true
+                    });
+                })
+                .Build();
+
+            await host.RunAsync();
+        }
+    }
+}
