@@ -150,7 +150,7 @@ public class ReportGenerator
         var requestContent = new MultipartFormDataContent();
         var imageContent = new ByteArrayContent(image);
         imageContent.Headers.ContentType = MediaTypeHeaderValue.Parse("image/jpeg"); // Adjust the MIME type as necessary
-        requestContent.Add(imageContent, "Image", fileName);
+        requestContent.Add(imageContent, "Letter", fileName);
         requestContent.Add(new StringContent(JsonConvert.SerializeObject(document)), "Document");
 
         var response = await client.PostAsync($"{url}/api/Document/InsertDocument", requestContent);
