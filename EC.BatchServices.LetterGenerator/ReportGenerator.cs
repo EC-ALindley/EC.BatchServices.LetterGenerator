@@ -6,14 +6,12 @@ using EC.BatchServices.LetterGenerator;
 using System.Data;
 using System.Net.Http.Headers;
 using System.Web;
-using Newtonsoft.Json.Linq;
 using RestSharp;
 using System.Text;
 
 public class ReportGenerator
 {
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly Config _config;
     private readonly IDbConnection _dbConnection;
     private readonly ILogger<ReportGenerator> _logger;
 
@@ -24,7 +22,6 @@ public class ReportGenerator
         ILogger<ReportGenerator> logger)
     {
         _httpClientFactory = httpClientFactory;
-        _config = config.Value;
         _dbConnection = dbConnection;
         _logger = logger;
     }
