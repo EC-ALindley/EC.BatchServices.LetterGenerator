@@ -1,4 +1,4 @@
-﻿namespace EC.BatchServices.LetterGenerator
+﻿namespace EC.BatchServices.LetterGenerator.Configs
 {
     public class DocumentImagingConfig
     {
