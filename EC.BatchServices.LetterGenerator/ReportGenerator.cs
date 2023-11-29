@@ -1,5 +1,4 @@
-﻿using Microsoft.Extensions.Options;
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Dapper;
 using EC.BatchServices.LetterGenerator.DTOs;
 using EC.BatchServices.LetterGenerator;
@@ -8,22 +7,25 @@ using System.Net.Http.Headers;
 using System.Web;
 using RestSharp;
 using System.Text;
+using EC.BatchServices.LetterGenerator.Interfaces;
 
 public class ReportGenerator
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IDbConnection _dbConnection;
-    private readonly ILogger<ReportGenerator> _logger;
+    private readonly ILoggerAdapter<ReportGenerator> _logger;
+    private readonly IReportRepository _reportRepository;
 
     public ReportGenerator(
         IHttpClientFactory httpClientFactory,
-        IOptions<Config> config,
         IDbConnection dbConnection,
-        ILogger<ReportGenerator> logger)
+        ILoggerAdapter<ReportGenerator> logger,
+        IReportRepository reportRepository)
     {
         _httpClientFactory = httpClientFactory;
         _dbConnection = dbConnection;
         _logger = logger;
+        _reportRepository = reportRepository;
     }
 
     public async Task GenerateAndSaveReportsAsync()
@@ -42,31 +44,25 @@ public class ReportGenerator
                 {
                     await GenerateAndSaveReportAsync(request);
                     reportsGenerated++;
-                    _logger.LogInformation($"{reportsGenerated} reports have been generated.");
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"Error generating report for request on claimID {request.ClaimID}: {ex.Message}");
+                    _logger.LogInformation($"Error generating report for request on claimID {request.ClaimID}: {ex.Message}");
                 }
             }
+            _logger.LogInformation($"{reportsGenerated} reports have been generated.");
         }
         catch (Exception ex)
         {
-            _logger.LogError($"An error occurred: {ex.Message}");
+            _logger.LogError($"An error occurred: {ex}");
         }
     }
-
-
-    private async Task<List<ReportRequest>> GetPendingReportsAsync()
+    protected async Task<List<ReportRequest>> GetPendingReportsAsync()
     {
-        var reportsNeededQuery = "SELECT ReportQueueID, ReportName, " +
-            "ReportTypeID, DocumentTypeID, ClaimID, DocumentFormat FROM ReportService.ReportQueue WHERE Flag = 1";
-        var result = await _dbConnection.QueryAsync<(int ReportQueueID, string ReportName, int ReportTypeID, 
-            int DocumentTypeID, int ClaimID, string DocumentFormat)>(reportsNeededQuery);
-        return await BuildReportRequestsAsync(result);
+        var reportsNeeded = await _reportRepository.GetPendingReportsAsync();
+        return await BuildReportRequestsAsync(reportsNeeded);
     }
-
-    private async Task<List<ReportRequest>> BuildReportRequestsAsync(IEnumerable<(int ReportQueueID, string ReportName, 
+    public async Task<List<ReportRequest>> BuildReportRequestsAsync(IEnumerable<(int ReportQueueID, string ReportName, 
         int ReportTypeID, int DocumentTypeID, int ClaimID, string DocumentFormat)> reportsNeeded)
     {
         var reportRequests = new List<ReportRequest>();
@@ -107,8 +103,11 @@ public class ReportGenerator
             if(reportRequest.ReportTypeID == 2)
             {
                 //Add the uploaded document to the EDICloud Queue
-                _logger.LogError("Adding the letter to the Processing Queue...");
+                _logger.LogInformation("Adding the letter to the Processing Queue...");
             }
+
+            _logger.LogInformation("Removing flag from queue item...");
+            await UpdateReportDetailsFlags(reportRequest.ReportQueueID);
         }
     }
 
@@ -136,37 +135,45 @@ public class ReportGenerator
 
     public async Task<bool> IsWorkPendingAsync()
     {
-        var workCountQuery = "SELECT COUNT(*) FROM ReportService.ReportQueue WHERE Flag = 1";
-        var workCount = await _dbConnection.ExecuteScalarAsync<int>(workCountQuery);
-
-        return workCount > 0;
+        return await _reportRepository.IsWorkPendingAsync();
     }
-    private async Task<List<EC.BatchServices.LetterGenerator.DTOs.Parameter>> GetReportQueueParametersFromDbAsync(int reportQueueId)
+    public async Task<List<EC.BatchServices.LetterGenerator.DTOs.Parameter>> GetReportQueueParametersFromDbAsync(int reportQueueId)
     {
-        var parameters = new DynamicParameters();
-        parameters.Add("@ReportQueueId", reportQueueId, DbType.Int32);
-
-        var result = await _dbConnection.QueryAsync<EC.BatchServices.LetterGenerator.DTOs.Parameter>("ReportService.GetReportParameters", parameters, commandType: CommandType.StoredProcedure);
-        return result.AsList();
+        return await _reportRepository.GetReportQueueParametersFromDbAsync(reportQueueId);
     }
-    private async Task UpdateReportDetailsFlags(int queueId)
+    public async Task UpdateReportDetailsFlags(int queueId)
     {
-        var query = "UPDATE EnforcerServices.ReportService.ReportQueue SET Flag = 0 WHERE ReportQueueID = @QueueId";
-
-        var result = await _dbConnection.ExecuteAsync(query, new { QueueId = queueId });
+        var result = await _reportRepository.UpdateReportDetailsFlags(queueId);
 
         if (result == 0)
         {
-            _logger.LogError("No report details were updated, check if the queueId is correct.");
+            _logger.LogInformation("No report details were updated, check if the queueId is correct.");
         }
+
+        _logger.LogInformation($"Item number {queueId} removed from the report queue.");
     }
-    private async Task UploadReportDocument(ReportRequest request, string fileName, int userID, byte[] image)
+    public async Task UploadReportDocument(ReportRequest request, string fileName, int userID, byte[] image)
     {
         var client = _httpClientFactory.CreateClient("DocumentImagingClient");
         var requestContent = new MultipartFormDataContent();
         var imageContent = new ByteArrayContent(image);
-        if(request.DocumentFormat == "pdf")
-        imageContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf"); // Set the correct content type
+        List<DocumentType> docTypes = DocumentTypeRegistry.GetDocumentTypes();
+
+
+        // Find the DocumentType based on the request's DocumentFormat
+        var documentType = docTypes.FirstOrDefault(dt => dt.Name.Equals(request.DocumentFormat, 
+            StringComparison.OrdinalIgnoreCase));
+
+        if (documentType != null)
+        {
+            // Set the correct content type based on the document type
+            imageContent.Headers.ContentType = new MediaTypeHeaderValue(documentType.MIMEType);
+        }
+        else
+        {
+            _logger.LogError($"Error: Document Type {request.DocumentFormat} is not a valid format.");
+            return;
+        }
 
         requestContent.Add(imageContent, "Image", fileName);
 
@@ -205,7 +212,7 @@ public class ReportGenerator
         }
         else
         {
-            _logger.LogInformation($"Upload Successful! ", response.Content);
+            _logger.LogInformation($"Upload Successful!");
         }
     }
 

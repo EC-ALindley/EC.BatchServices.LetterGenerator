@@ -1,7 +1,15 @@
+using EC.BatchServices.LetterGenerator.Configs;
+using EC.BatchServices.LetterGenerator.Interfaces;
+using EC.BatchServices.LetterGenerator.Repositories;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using NLog.Extensions.Logging;
+using System;
 using System.Data;
 using System.Data.SqlClient;
 using System.Net.Http.Headers;
+using System.Threading.Tasks;
 
 namespace EC.BatchServices.LetterGenerator
 {
@@ -20,9 +28,12 @@ namespace EC.BatchServices.LetterGenerator
                     var configuration = hostContext.Configuration;
 
                     services.AddHttpClient();
-                    services.AddTransient<ReportGenerator>();
-                    services.AddHostedService<Worker>();
+                    services.AddTransient<ReportGenerator>(); // Ensure ReportGenerator's dependencies are registered
+                    services.AddHostedService<Worker>(); // Ensure Worker's dependencies are registered
+                    services.AddScoped(typeof(ILoggerAdapter<>), typeof(NLogAdapter<>));
+                    services.AddScoped(typeof(IReportRepository), typeof(ReportRepository));
 
+                    // Ensure Config classes are correctly defined and accessible
                     services.Configure<Config>(config =>
                     {
                         config.DocumentImaging = configuration.GetSection("DocumentImagingConfig").Get<DocumentImagingConfig>();
@@ -35,12 +46,13 @@ namespace EC.BatchServices.LetterGenerator
                     services.AddHttpClient("SSRSClient", client =>
                     {
                         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Negotiate");
-                        client.Timeout = Timeout.InfiniteTimeSpan;
+                        client.Timeout = TimeSpan.FromMinutes(10); // Example timeout
                     })
                     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler()
                     {
                         UseDefaultCredentials = true
                     });
+
                     services.AddHttpClient("DocumentImagingClient", client =>
                     {
                         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Negotiate");
